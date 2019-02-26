@@ -12,7 +12,9 @@ eosio-cpp -o cron.wasm cron.cpp --abigen
 ## Create account
 ```bash 
 cleos wallet unlock
-cleos create account eosio hello <password>
+cleos create account eosio hello <pub_key>
+cleos create account eosio andrew <pub_key>
+cleos set account permission andrew active '{"threshold": 1,"keys": [{"key": "<pub_key>"}],"accounts":[{"permission":{"actor":"hello","permission":"eosio.code"},"weight":1}]}' owner -p andrew
 cleos set account permission hello active --add-code
 ```
 

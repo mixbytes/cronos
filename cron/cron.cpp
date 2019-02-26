@@ -45,18 +45,19 @@ public:
             row.action = action;
             row.period = period;
             row.next_run = current_time + period;
+            row.last_updated = current_time;
             row.active = true;
         });
         print("Job id: ", pk, "\n");
     }
 
-    ACTION run(name from, uint32_t polling_interval) {
+    ACTION run(name from, uint32_t polling_interval, uint32_t rows_count) {
         require_auth(get_self());
         if (stop_execution.get())
             return;
 
-        scan_table();
-        create_transaction(_self, _self, "run", polling_interval, make_tuple(_self, polling_interval));
+        scan_table(rows_count);
+        create_transaction(_self, _self, "run", polling_interval, make_tuple(_self, polling_interval, rows_count));
     }
 
     ACTION enable(name from, uint64_t job_id) {
@@ -79,19 +80,24 @@ public:
         }
     }
 
-    void scan_table() {
+    void scan_table(uint32_t rows_count) {
         print("Scanning timetable\n");
         timetable cron_table(_code, _code.value);
-        for (auto iterator = cron_table.begin(); iterator != cron_table.end(); iterator++) {
-            auto& item = *iterator;
+        for (const auto& item : cron_table.get_index<"lastupdated"_n>()) {
+            if (!rows_count) {
+                break;
+            }
             print("Processing ", item.key, "\n");
-            if (time_point_sec(now()) >= item.next_run) {
+            time_point_sec current_time(now());
+            if (current_time >= item.next_run) {
                 // Empty Args
                 create_transaction(item.from, item.account, item.action, item.period, tuple<name>(item.from));
-                cron_table.modify(iterator, _code, [&](auto& row) {
+                cron_table.modify(item, _code, [&](auto& row) {
                     row.next_run = item.next_run + item.period;
+                    row.last_updated = current_time;
                 });
             }
+            --rows_count;
         }
     }
 
@@ -100,9 +106,8 @@ public:
             const std::tuple<TParams...>& args) {
         print_f("Creating transaction: payer=% target=[%:%] delay=%\n", payer, account, action, delay);
         eosio::transaction t;
-
         t.actions.emplace_back(
-                permission_level(_self, "active"_n),
+                permission_level(_code, "active"_n),
                 account,
                 name(action),
                 args);
@@ -132,18 +137,20 @@ private:
         name account;
         string action;
         uint32_t period;
+        time_point_sec last_updated;
         time_point_sec next_run;
         bool active;
 
         uint64_t primary_key() const { return key;}
-        uint64_t by_from() const { return from.value; }
+        uint64_t by_last_updated() const { return last_updated.utc_seconds; }
     };
 
     typedef eosio::multi_index<"timetable"_n,
-                                timetable_data,
-                                eosio::indexed_by<"from"_n, eosio::const_mem_fun<timetable_data,
-                                                                                 uint64_t ,
-                                                                                 &timetable_data::by_from>>> timetable;
+                               timetable_data,
+                               eosio::indexed_by<"lastupdated"_n,
+                                                 eosio::const_mem_fun<timetable_data,
+                                                                      uint64_t,
+                                                                      &timetable_data::by_last_updated>>> timetable;
     eosio::singleton<"flag"_n, bool> stop_execution;
     eosio::singleton<"increment"_n, uint64_t> unique_id;
 };
