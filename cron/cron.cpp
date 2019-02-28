@@ -1,5 +1,4 @@
 #include <eosiolib/asset.hpp>
-#include <eosiolib/eosio.hpp>
 #include <eosiolib/transaction.hpp>
 #include <eosiolib/singleton.hpp>
 
@@ -24,21 +23,30 @@ public:
         print("THE DUMB ACTION CALLED by ", from);
     }
 
-    ACTION start(name from) {
+    ACTION setbalance(name from, uint64_t amount) {
         require_auth(get_self());
-        stop_execution.set(false, from);
+        balance_sheet balance(_self, _self.value);
+        balance.modify(balance.find(from.value), _code, [&](auto& row) {
+            row.balance = amount;
+        });
+    }
+
+    ACTION start() {
+        require_auth(get_self());
+        stop_execution.set(false, _code);
         print("Set START");
     }
 
-    ACTION stop(name from) {
+    ACTION stop() {
         require_auth(get_self());
-        stop_execution.set(true, from);
+        stop_execution.set(true, _code);
         print("Set STOP");
     }
 
     ACTION schedule(name from, name account, string action, uint32_t period) {
         require_auth(from);
-        deposit(from, CALL_PRICE * PREPAY_CALL_AMOUNT);
+        check(get_balance(from) >= CALL_PRICE * PREPAY_CALL_AMOUNT, "Insufficient balance to schedule a task");
+        reduce_balance(from, CALL_PRICE * PREPAY_CALL_AMOUNT);
         time_point_sec current_time(now());
         timetable cron_table(_code, _code.value);
         const auto pk = cron_table.available_primary_key();
@@ -72,16 +80,8 @@ public:
         change_status(from, job_id, false);
     }
 
-    ACTION deposit(name from, uint64_t amount) {
-        require_auth(from);
-        action(
-                permission_level(from, "active"_n),
-                "eosio.token"_n,
-                "transfer"_n,
-                std::make_tuple(from, _self, asset(amount,
-                                                   symbol("CRON", 0)), std::string("cronos_deposit"))
-        ).send();
-        add_balance(from, amount);
+    ACTION deposit(name from, name to, asset quantity, string memo) {
+        add_balance(from, quantity.amount);
     }
 
     ACTION withdraw(name from, uint64_t amount) {
@@ -95,31 +95,29 @@ public:
                 std::make_tuple(_self, from, asset(amount,
                                                    symbol("CRON", 0)), std::string("cronos_withraw"))
         ).send();
-
     }
 
     cron(name receiver, name code, datastream<const char*> ds):
             contract(receiver, code, ds), stop_execution(_self, _self.value), unique_id(_self, _self.value) {
-
         if (!stop_execution.exists()) {
-            stop_execution.set(false, _code);
+            stop_execution.set(false, _self);
         }
 
         if (!unique_id.exists()) {
-            unique_id.set(0, _code);
+            unique_id.set(0, _self);
         }
     }
 
     void scan_schedules(uint32_t rows_count) {
         print("Scanning timetable\n");
-        timetable cron_table(_code, _code.value);
+        timetable cron_table(_self, _self.value);
         for (const auto& item : cron_table.get_index<"lastupdated"_n>()) {
             if (!rows_count) {
                 break;
             }
             print("Processing ", item.key, "\n");
             time_point_sec current_time(now());
-            cron_table.modify(item, _code, [&](auto& row) {
+            cron_table.modify(item, _self, [&](auto& row) {
                 row.last_updated = current_time;
             });
 
@@ -129,13 +127,13 @@ public:
 
             if (current_time >= item.next_run) {
                 const name& account_from = item.from;
-                reduce_balance(account_from, CALL_PRICE);
 
                 if (get_balance(account_from) >= CALL_PRICE) {
+                    reduce_balance(account_from, CALL_PRICE);
                     create_transaction(account_from, item.account, item.action, item.period, tuple<name>(account_from));
                 }
 
-                cron_table.modify(item, _code, [&](auto& row) {
+                cron_table.modify(item, _self, [&](auto& row) {
                     row.next_run = item.next_run + item.period;
                 });
             }
@@ -170,14 +168,14 @@ public:
     }
 
     void update_balance(name from, int64_t amount) {
-        balance_sheet balance(_code, _code.value);
+        balance_sheet balance(_self, _self.value);
         auto iterator = balance.find(from.value);
         if (iterator != balance.end()) {
-            balance.modify(iterator, from, [&](auto& row) {
+            balance.modify(iterator, _self, [&](auto& row) {
                 row.balance += amount;
             });
         } else {
-            balance.emplace(from, [&](auto& row) {
+            balance.emplace(_self, [&](auto& row) {
                 row.account = from;
                 row.balance = amount;
             });
@@ -185,6 +183,9 @@ public:
     }
 
     void add_balance(name from, uint64_t amount) {
+        // Overflow check
+        uint64_t balance = get_balance(from);
+        check(balance + amount >= balance, "Int64 Overflow error");
         update_balance(from, amount);
     }
 
@@ -194,7 +195,8 @@ public:
 
     uint64_t get_balance(name from) {
         balance_sheet balance(_self, _self.value);
-        return balance.require_find(from.value)->balance;
+        auto iterator = balance.find(from.value);
+        return iterator != balance.end() ? iterator->balance : 0;
     }
 
 private:
@@ -235,4 +237,15 @@ private:
     const uint32_t CALL_PRICE = 10;
 };
 
-EOSIO_DISPATCH(cron, (dumb)(enable)(disable)(deposit)(withdraw)(start)(stop)(schedule)(run))
+extern "C" {
+   void apply(uint64_t receiver, uint64_t code, uint64_t action) {
+      if (code == receiver) {
+          switch (action) {
+              EOSIO_DISPATCH_HELPER(cron,
+                                    (dumb)(setbalance)(enable)(disable)(deposit)(withdraw)(start)(stop)(schedule)(run))
+          }
+      } else if (code == name("eosio.token").value && action == name("transfer").value) {
+            execute_action(name(receiver), name(code), &cron::deposit);
+      }
+   }
+}
