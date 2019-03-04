@@ -46,7 +46,6 @@ public:
     ACTION schedule(name from, name account, string action, uint32_t period) {
         require_auth(from);
         check(get_balance(from) >= CALL_PRICE * PREPAY_CALL_AMOUNT, "Insufficient balance to schedule a task");
-        reduce_balance(from, CALL_PRICE * PREPAY_CALL_AMOUNT);
         time_point_sec current_time(now());
         timetable cron_table(_code, _code.value);
         const auto pk = cron_table.available_primary_key();
@@ -87,6 +86,7 @@ public:
     ACTION withdraw(name from, uint64_t amount) {
         require_auth(from);
         check(get_balance(from) >= amount, "Withdraw amount is larger than wallet balance");
+        reduce_balance(from, amount);
         action(
                 permission_level(_self, "active"_n),
                 "eosio.token"_n,
