@@ -63,13 +63,13 @@ public:
         print("Job id: ", pk, "\n");
     }
 
-    ACTION run(name from, uint32_t polling_interval, uint32_t rows_count) {
+    ACTION run(uint32_t polling_interval, uint32_t rows_count) {
         require_auth(get_self());
         if (stop_execution.get())
             return;
 
         scan_schedules(rows_count);
-        create_transaction(_self, _self, "run", polling_interval, make_tuple(_self, polling_interval, rows_count));
+        create_transaction(_self, _self, "run", polling_interval, make_tuple(polling_interval, rows_count));
     }
 
     ACTION enable(name from, uint64_t job_id) {
@@ -87,7 +87,6 @@ public:
     ACTION withdraw(name from, uint64_t amount) {
         require_auth(from);
         check(get_balance(from) >= amount, "Withdraw amount is larger than wallet balance");
-        reduce_balance(from, amount);
         action(
                 permission_level(_self, "active"_n),
                 "eosio.token"_n,
